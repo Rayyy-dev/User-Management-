@@ -1,25 +1,30 @@
 """
-User Registration System - REST API
-A Flask-based REST API for user registration with PostgreSQL database.
+DevCommunity - Community Forum Registration System
+A Flask-based REST API for community member registration with PostgreSQL database.
 
 Endpoints:
-- POST   /api/users      - Register a new user
-- GET    /api/users      - List all users
-- GET    /api/users/<id> - Get user by ID
-- DELETE /api/users/<id> - Delete user by ID
+- POST   /api/users      - Register a new member
+- GET    /api/users      - List all members
+- GET    /api/users/<id> - Get member by ID
+- DELETE /api/users/<id> - Delete member by ID
 - GET    /health         - Health check endpoint
+- GET/POST /login        - Login page
+- GET    /logout         - Logout
+- GET/POST /profile      - Member profile
 """
 
 import os
 import re
 from datetime import datetime
-from flask import Flask, request, jsonify, render_template_string
-from werkzeug.security import generate_password_hash
+from functools import wraps
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, flash
+from werkzeug.security import generate_password_hash, check_password_hash
 from email_validator import validate_email, EmailNotValidError
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 
 # Database configuration from environment variable
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://admin:secretpassword@localhost:5432/userdb')
@@ -29,6 +34,32 @@ def get_db_connection():
     """Create and return a database connection."""
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
+
+
+def login_required(f):
+    """Decorator to require login for protected routes."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def get_current_user():
+    """Get the current logged-in user from session."""
+    if 'user_id' not in session:
+        return None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id, username, email, created_at, last_login FROM users WHERE id = %s', (session['user_id'],))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        return user
+    except:
+        return None
 
 
 def validate_user_input(data):
@@ -62,6 +93,140 @@ def validate_user_input(data):
     return errors
 
 
+# Login page
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Login page and authentication."""
+    if 'user_id' in session:
+        return redirect(url_for('root'))
+
+    error = None
+    if request.method == 'POST':
+        email = request.form.get('email', '').lower().strip()
+        password = request.form.get('password', '')
+
+        if not email or not password:
+            error = 'Email and password are required'
+        else:
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute('SELECT id, username, email, password_hash FROM users WHERE email = %s', (email,))
+                user = cur.fetchone()
+
+                if user and check_password_hash(user['password_hash'], password):
+                    # Update last_login
+                    cur.execute('UPDATE users SET last_login = %s WHERE id = %s', (datetime.utcnow(), user['id']))
+                    conn.commit()
+
+                    session['user_id'] = user['id']
+                    session['username'] = user['username']
+                    cur.close()
+                    conn.close()
+                    return redirect(url_for('root'))
+                else:
+                    error = 'Invalid email or password'
+
+                cur.close()
+                conn.close()
+            except Exception as e:
+                error = 'An error occurred. Please try again.'
+
+    return render_template_string(LOGIN_TEMPLATE, error=error)
+
+
+# Logout
+@app.route('/logout')
+def logout():
+    """Logout and clear session."""
+    session.clear()
+    return redirect(url_for('login'))
+
+
+# Profile page
+@app.route('/profile', methods=['GET', 'POST'])
+@login_required
+def profile():
+    """User profile page - view and edit."""
+    user = get_current_user()
+    if not user:
+        session.clear()
+        return redirect(url_for('login'))
+
+    success = None
+    error = None
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+
+        if action == 'update_profile':
+            new_username = request.form.get('username', '').strip()
+            new_email = request.form.get('email', '').lower().strip()
+
+            # Validate
+            if len(new_username) < 3:
+                error = 'Username must be at least 3 characters'
+            elif not re.match(r'^[a-zA-Z0-9_]+$', new_username):
+                error = 'Username can only contain letters, numbers, and underscores'
+            else:
+                try:
+                    validate_email(new_email, check_deliverability=False)
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute(
+                        'UPDATE users SET username = %s, email = %s WHERE id = %s',
+                        (new_username, new_email, user['id'])
+                    )
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    session['username'] = new_username
+                    success = 'Profile updated successfully'
+                    user = get_current_user()
+                except EmailNotValidError:
+                    error = 'Invalid email format'
+                except psycopg2.IntegrityError as e:
+                    if 'username' in str(e):
+                        error = 'Username already taken'
+                    else:
+                        error = 'Email already taken'
+                except Exception as e:
+                    error = 'An error occurred'
+
+        elif action == 'change_password':
+            current_password = request.form.get('current_password', '')
+            new_password = request.form.get('new_password', '')
+            confirm_password = request.form.get('confirm_password', '')
+
+            if not current_password or not new_password:
+                error = 'All password fields are required'
+            elif len(new_password) < 6:
+                error = 'New password must be at least 6 characters'
+            elif new_password != confirm_password:
+                error = 'New passwords do not match'
+            else:
+                try:
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute('SELECT password_hash FROM users WHERE id = %s', (user['id'],))
+                    db_user = cur.fetchone()
+
+                    if not check_password_hash(db_user['password_hash'], current_password):
+                        error = 'Current password is incorrect'
+                    else:
+                        new_hash = generate_password_hash(new_password)
+                        cur.execute('UPDATE users SET password_hash = %s WHERE id = %s', (new_hash, user['id']))
+                        conn.commit()
+                        success = 'Password changed successfully'
+
+                    cur.close()
+                    conn.close()
+                except Exception as e:
+                    error = 'An error occurred'
+
+    return render_template_string(PROFILE_TEMPLATE, user=user, success=success, error=error)
+
+
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -93,6 +258,7 @@ def health_check():
             'timestamp': datetime.utcnow().isoformat()
         }), 200 if status == 'healthy' else 503
 
+    current_user = get_current_user()
     html = f'''
     <!DOCTYPE html>
     <html lang="en">
@@ -228,7 +394,7 @@ def health_check():
             <div class="card">
                 <div class="header">
                     <div class="status-icon {status}">
-                        {"✓" if status == "healthy" else "✕"}
+                        {"&#10003;" if status == "healthy" else "&#10007;"}
                     </div>
                     <h1>System Health</h1>
                     <span class="status {status}">
@@ -255,7 +421,7 @@ def health_check():
                     {f'<div class="metric"><span class="metric-label">Error</span><span class="metric-value error">{error}</span></div>' if error else ''}
                 </div>
                 <div class="footer">
-                    <a href="/">← Back to Dashboard</a>
+                    <a href="/">&#8592; Back to Dashboard</a>
                     <div class="timestamp">Last checked: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC</div>
                 </div>
             </div>
@@ -328,7 +494,7 @@ def list_users():
         conn = get_db_connection()
         cur = conn.cursor()
 
-        cur.execute('SELECT id, username, email, created_at FROM users ORDER BY created_at DESC')
+        cur.execute('SELECT id, username, email, created_at, last_login FROM users ORDER BY created_at DESC')
         users = cur.fetchall()
 
         cur.close()
@@ -341,7 +507,8 @@ def list_users():
                 'id': user['id'],
                 'username': user['username'],
                 'email': user['email'],
-                'created_at': user['created_at'].isoformat()
+                'created_at': user['created_at'].isoformat(),
+                'last_login': user['last_login'].isoformat() if user['last_login'] else None
             })
 
         return jsonify({
@@ -362,7 +529,7 @@ def get_user(user_id):
         cur = conn.cursor()
 
         cur.execute(
-            'SELECT id, username, email, created_at FROM users WHERE id = %s',
+            'SELECT id, username, email, created_at, last_login FROM users WHERE id = %s',
             (user_id,)
         )
         user = cur.fetchone()
@@ -378,7 +545,8 @@ def get_user(user_id):
                 'id': user['id'],
                 'username': user['username'],
                 'email': user['email'],
-                'created_at': user['created_at'].isoformat()
+                'created_at': user['created_at'].isoformat(),
+                'last_login': user['last_login'].isoformat() if user['last_login'] else None
             }
         }), 200
 
@@ -418,14 +586,420 @@ def delete_user(user_id):
         return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
 
 
-# HTML Template - Clean Modern UI
+# Login Template
+LOGIN_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - DevCommunity</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'DM Sans', system-ui, sans-serif;
+            background: #f5f5f7;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .container { width: 100%; max-width: 420px; }
+        .logo {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        .logo h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #1d1d1f;
+        }
+        .logo p {
+            color: #6e6e73;
+            margin-top: 8px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 20px;
+            border: 1px solid #e8e8ed;
+            padding: 32px;
+        }
+        .field {
+            margin-bottom: 20px;
+        }
+        .field label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #1d1d1f;
+            margin-bottom: 8px;
+        }
+        .field input {
+            width: 100%;
+            padding: 14px 16px;
+            font-size: 15px;
+            font-family: inherit;
+            border: 1px solid #d2d2d7;
+            border-radius: 12px;
+            background: #fff;
+            color: #1d1d1f;
+            transition: all 0.2s;
+        }
+        .field input::placeholder { color: #a1a1a6; }
+        .field input:focus {
+            outline: none;
+            border-color: #0071e3;
+            box-shadow: 0 0 0 4px rgba(0,113,227,0.1);
+        }
+        .btn {
+            width: 100%;
+            padding: 14px 28px;
+            font-size: 15px;
+            font-weight: 600;
+            font-family: inherit;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #0071e3;
+            color: #fff;
+        }
+        .btn:hover { background: #0077ed; }
+        .error {
+            background: #fee2e2;
+            color: #dc2626;
+            padding: 12px 16px;
+            border-radius: 10px;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 24px;
+            font-size: 14px;
+            color: #6e6e73;
+        }
+        .footer a {
+            color: #0071e3;
+            text-decoration: none;
+        }
+        .footer a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <h1>DevCommunity</h1>
+            <p>Welcome back to the community</p>
+        </div>
+        <div class="card">
+            {% if error %}
+            <div class="error">{{ error }}</div>
+            {% endif %}
+            <form method="POST">
+                <div class="field">
+                    <label>Email</label>
+                    <input type="email" name="email" placeholder="Enter your email" required>
+                </div>
+                <div class="field">
+                    <label>Password</label>
+                    <input type="password" name="password" placeholder="Enter your password" required>
+                </div>
+                <button type="submit" class="btn">Sign In</button>
+            </form>
+        </div>
+        <div class="footer">
+            New here? <a href="/">Join the community</a>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+
+# Profile Template
+PROFILE_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profile - DevCommunity</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'DM Sans', system-ui, sans-serif;
+            background: #f5f5f7;
+            color: #1d1d1f;
+            min-height: 100vh;
+        }
+        .app {
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        .nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+        .logo {
+            font-size: 20px;
+            font-weight: 700;
+            color: #1d1d1f;
+            text-decoration: none;
+        }
+        .nav-links {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .nav-link {
+            padding: 6px 12px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #6e6e73;
+            text-decoration: none;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        .nav-link:hover { background: #e8e8ed; color: #1d1d1f; }
+        .nav-link.active { background: #1d1d1f; color: #fff; }
+        .user-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 12px 4px 4px;
+            background: #f5f5f7;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #1d1d1f;
+        }
+        .user-badge .avatar {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #0071e3;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .header {
+            margin-bottom: 20px;
+        }
+        .header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .header p {
+            color: #6e6e73;
+            font-size: 14px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 16px;
+            border: 1px solid #e8e8ed;
+            margin-bottom: 16px;
+        }
+        .card-head {
+            padding: 14px 18px;
+            border-bottom: 1px solid #f5f5f7;
+        }
+        .card-head h2 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .card-body {
+            padding: 18px;
+        }
+        .field {
+            margin-bottom: 14px;
+        }
+        .field label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: #1d1d1f;
+            margin-bottom: 6px;
+        }
+        .field input {
+            width: 100%;
+            padding: 10px 12px;
+            font-size: 14px;
+            font-family: inherit;
+            border: 1px solid #d2d2d7;
+            border-radius: 8px;
+            background: #fff;
+            color: #1d1d1f;
+            transition: all 0.2s;
+        }
+        .field input::placeholder { color: #a1a1a6; }
+        .field input:focus {
+            outline: none;
+            border-color: #0071e3;
+            box-shadow: 0 0 0 3px rgba(0,113,227,0.1);
+        }
+        .field input:disabled {
+            background: #f5f5f7;
+            color: #6e6e73;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 20px;
+            font-size: 13px;
+            font-weight: 600;
+            font-family: inherit;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #0071e3;
+            color: #fff;
+        }
+        .btn-primary:hover { background: #0077ed; }
+        .alert {
+            padding: 12px 16px;
+            border-radius: 10px;
+            font-size: 13px;
+            margin-bottom: 16px;
+        }
+        .alert-success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .alert-error {
+            background: #fee2e2;
+            color: #dc2626;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #f5f5f7;
+        }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { color: #6e6e73; font-size: 13px; }
+        .info-value { font-weight: 500; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <nav class="nav">
+            <a href="/" class="logo">DevCommunity</a>
+            <div class="nav-links">
+                <a href="/" class="nav-link">Dashboard</a>
+                <a href="/profile" class="nav-link active">Profile</a>
+                <a href="/health" class="nav-link">Health</a>
+                <div class="user-badge">
+                    <span class="avatar">{{ user.username[:2].upper() }}</span>
+                    {{ user.username }}
+                </div>
+                <a href="/logout" class="nav-link">Logout</a>
+            </div>
+        </nav>
+
+        <div class="header">
+            <h1>Your Profile</h1>
+            <p>Manage your account settings</p>
+        </div>
+
+        {% if success %}
+        <div class="alert alert-success">{{ success }}</div>
+        {% endif %}
+        {% if error %}
+        <div class="alert alert-error">{{ error }}</div>
+        {% endif %}
+
+        <div class="card">
+            <div class="card-head">
+                <h2>Account Information</h2>
+            </div>
+            <div class="card-body">
+                <div class="info-row">
+                    <span class="info-label">User ID</span>
+                    <span class="info-value">#{{ user.id }}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Member Since</span>
+                    <span class="info-value">{{ user.created_at.strftime('%B %d, %Y') }}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Last Login</span>
+                    <span class="info-value">{{ user.last_login.strftime('%B %d, %Y at %H:%M') if user.last_login else 'Never' }}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <h2>Edit Profile</h2>
+            </div>
+            <div class="card-body">
+                <form method="POST">
+                    <input type="hidden" name="action" value="update_profile">
+                    <div class="field">
+                        <label>Username</label>
+                        <input type="text" name="username" value="{{ user.username }}" required>
+                    </div>
+                    <div class="field">
+                        <label>Email</label>
+                        <input type="email" name="email" value="{{ user.email }}" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <h2>Change Password</h2>
+            </div>
+            <div class="card-body">
+                <form method="POST">
+                    <input type="hidden" name="action" value="change_password">
+                    <div class="field">
+                        <label>Current Password</label>
+                        <input type="password" name="current_password" placeholder="Enter current password" required>
+                    </div>
+                    <div class="field">
+                        <label>New Password</label>
+                        <input type="password" name="new_password" placeholder="Min 6 characters" required>
+                    </div>
+                    <div class="field">
+                        <label>Confirm New Password</label>
+                        <input type="password" name="confirm_password" placeholder="Confirm new password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Change Password</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+
+# HTML Template - Clean Modern UI with Login/Search/Modal
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Users</title>
+    <title>DevCommunity - Developer Forum</title>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -438,9 +1012,9 @@ HTML_TEMPLATE = '''
         }
 
         .app {
-            max-width: 1200px;
+            max-width: 1100px;
             margin: 0 auto;
-            padding: 48px 24px;
+            padding: 24px;
         }
 
         /* Nav */
@@ -448,7 +1022,7 @@ HTML_TEMPLATE = '''
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 48px;
+            margin-bottom: 24px;
         }
 
         .logo {
@@ -460,6 +1034,7 @@ HTML_TEMPLATE = '''
         .nav-links {
             display: flex;
             gap: 8px;
+            align-items: center;
         }
 
         .nav-link {
@@ -475,32 +1050,78 @@ HTML_TEMPLATE = '''
         .nav-link:hover { background: #e8e8ed; color: #1d1d1f; }
         .nav-link.active { background: #1d1d1f; color: #fff; }
 
+        .user-badge {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 14px 6px 6px;
+            background: #f5f5f7;
+            border-radius: 24px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #1d1d1f;
+            margin-left: 8px;
+        }
+
+        .user-badge .avatar {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #0071e3;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
         /* Hero */
         .hero {
             text-align: center;
-            margin-bottom: 64px;
+            margin-bottom: 40px;
         }
 
         .hero h1 {
-            font-size: 48px;
+            font-size: 36px;
             font-weight: 700;
-            letter-spacing: -0.03em;
-            margin-bottom: 16px;
+            letter-spacing: -0.02em;
+            margin-bottom: 8px;
             background: linear-gradient(135deg, #1d1d1f 0%, #6e6e73 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
 
         .hero p {
-            font-size: 18px;
+            font-size: 16px;
             color: #6e6e73;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            margin-top: 20px;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #1d1d1f;
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: #6e6e73;
+            margin-top: 2px;
         }
 
         /* Main Grid */
         .main-grid {
             display: grid;
-            grid-template-columns: 400px 1fr;
-            gap: 32px;
+            grid-template-columns: 300px 1fr;
+            gap: 24px;
+            align-items: start;
         }
 
         @media (max-width: 900px) {
@@ -510,45 +1131,45 @@ HTML_TEMPLATE = '''
         /* Card */
         .card {
             background: #fff;
-            border-radius: 20px;
+            border-radius: 16px;
             border: 1px solid #e8e8ed;
         }
 
         .card-head {
-            padding: 24px 28px 20px;
+            padding: 16px 20px;
             border-bottom: 1px solid #f5f5f7;
         }
 
         .card-head h2 {
-            font-size: 16px;
+            font-size: 15px;
             font-weight: 600;
             color: #1d1d1f;
         }
 
         .card-body {
-            padding: 28px;
+            padding: 20px;
         }
 
         /* Form */
         .field {
-            margin-bottom: 20px;
+            margin-bottom: 14px;
         }
 
         .field label {
             display: block;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
             color: #1d1d1f;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         }
 
         .field input {
             width: 100%;
-            padding: 14px 16px;
-            font-size: 15px;
+            padding: 10px 12px;
+            font-size: 14px;
             font-family: inherit;
             border: 1px solid #d2d2d7;
-            border-radius: 12px;
+            border-radius: 8px;
             background: #fff;
             color: #1d1d1f;
             transition: all 0.2s;
@@ -558,20 +1179,20 @@ HTML_TEMPLATE = '''
         .field input:focus {
             outline: none;
             border-color: #0071e3;
-            box-shadow: 0 0 0 4px rgba(0,113,227,0.1);
+            box-shadow: 0 0 0 3px rgba(0,113,227,0.1);
         }
 
         .btn {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 8px;
-            padding: 14px 28px;
-            font-size: 15px;
+            gap: 6px;
+            padding: 10px 20px;
+            font-size: 14px;
             font-weight: 600;
             font-family: inherit;
             border: none;
-            border-radius: 12px;
+            border-radius: 8px;
             cursor: pointer;
             transition: all 0.2s;
         }
@@ -602,6 +1223,30 @@ HTML_TEMPLATE = '''
 
         .btn-delete:hover { background: #fff5f5; }
 
+        /* Search */
+        .search-box {
+            padding: 12px 16px;
+            border-bottom: 1px solid #f5f5f7;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 8px 12px;
+            font-size: 13px;
+            font-family: inherit;
+            border: 1px solid #e8e8ed;
+            border-radius: 6px;
+            background: #fafafa;
+            color: #1d1d1f;
+            transition: all 0.2s;
+        }
+
+        .search-input:focus {
+            outline: none;
+            background: #fff;
+            border-color: #0071e3;
+        }
+
         /* Table */
         .users-card .card-body { padding: 0; }
 
@@ -609,21 +1254,21 @@ HTML_TEMPLATE = '''
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 20px 28px;
+            padding: 14px 16px;
             border-bottom: 1px solid #f5f5f7;
         }
 
         .users-header h2 {
-            font-size: 16px;
+            font-size: 15px;
             font-weight: 600;
         }
 
         .users-count {
-            font-size: 13px;
+            font-size: 12px;
             color: #6e6e73;
             background: #f5f5f7;
-            padding: 6px 12px;
-            border-radius: 20px;
+            padding: 4px 10px;
+            border-radius: 12px;
         }
 
         table {
@@ -633,8 +1278,8 @@ HTML_TEMPLATE = '''
 
         th {
             text-align: left;
-            padding: 14px 28px;
-            font-size: 12px;
+            padding: 10px 16px;
+            font-size: 11px;
             font-weight: 600;
             color: #6e6e73;
             text-transform: uppercase;
@@ -644,13 +1289,14 @@ HTML_TEMPLATE = '''
         }
 
         td {
-            padding: 18px 28px;
-            font-size: 14px;
+            padding: 12px 16px;
+            font-size: 13px;
             border-bottom: 1px solid #f5f5f7;
         }
 
         tr:last-child td { border-bottom: none; }
         tr:hover td { background: #fafafa; }
+        tr.hidden { display: none; }
 
         .user-row {
             display: flex;
@@ -774,15 +1420,87 @@ HTML_TEMPLATE = '''
 
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active { display: flex; }
+
+        .modal {
+            background: #fff;
+            border-radius: 20px;
+            width: 100%;
+            max-width: 400px;
+            padding: 32px;
+            text-align: center;
+            animation: modalIn 0.2s ease;
+        }
+
+        @keyframes modalIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        .modal-icon {
+            width: 56px;
+            height: 56px;
+            margin: 0 auto 20px;
+            background: #fee2e2;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+
+        .modal h3 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .modal p {
+            color: #6e6e73;
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+
+        .modal-buttons {
+            display: flex;
+            gap: 12px;
+        }
+
+        .modal-buttons .btn {
+            flex: 1;
+            padding: 12px;
+        }
+
+        .btn-danger {
+            background: #ff3b30;
+            color: #fff;
+        }
+
+        .btn-danger:hover { background: #e63329; }
+
         /* Footer */
         .footer {
-            margin-top: 64px;
-            padding-top: 32px;
+            margin-top: 32px;
+            padding-top: 20px;
             border-top: 1px solid #e8e8ed;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            font-size: 13px;
+            font-size: 12px;
             color: #6e6e73;
         }
 
@@ -802,47 +1520,61 @@ HTML_TEMPLATE = '''
 <body>
     <div class="app">
         <nav class="nav">
-            <div class="logo">UserSystem</div>
+            <div class="logo">DevCommunity</div>
             <div class="nav-links">
                 <a href="/" class="nav-link active">Dashboard</a>
                 <a href="/health" class="nav-link">Health</a>
                 <a href="http://localhost:8080" target="_blank" class="nav-link">Database</a>
+                <span id="authLinks"></span>
             </div>
         </nav>
 
         <div class="hero">
-            <h1>User Management</h1>
-            <p>Register and manage users with ease</p>
+            <h1>Join Our Community</h1>
+            <p>Connect with developers from around the world</p>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value" id="totalUsers">-</div>
+                    <div class="stat-label">Members</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="activeToday">-</div>
+                    <div class="stat-label">Active Today</div>
+                </div>
+            </div>
         </div>
 
         <div class="main-grid">
             <div class="card">
                 <div class="card-head">
-                    <h2>Add New User</h2>
+                    <h2>Become a Member</h2>
                 </div>
                 <div class="card-body">
                     <form id="registerForm">
                         <div class="field">
                             <label>Username</label>
-                            <input type="text" id="username" placeholder="Enter username" required>
+                            <input type="text" id="username" placeholder="Choose a username" required>
                         </div>
                         <div class="field">
                             <label>Email</label>
-                            <input type="email" id="email" placeholder="Enter email" required>
+                            <input type="email" id="email" placeholder="Your email address" required>
                         </div>
                         <div class="field">
                             <label>Password</label>
                             <input type="password" id="password" placeholder="Min 6 characters" required>
                         </div>
-                        <button type="submit" class="btn btn-primary">Create User</button>
+                        <button type="submit" class="btn btn-primary">Join Community</button>
                     </form>
                 </div>
             </div>
 
             <div class="card users-card">
                 <div class="users-header">
-                    <h2>Users</h2>
-                    <span class="users-count" id="userCount">0 users</span>
+                    <h2>Community Members</h2>
+                    <span class="users-count" id="userCount">0 members</span>
+                </div>
+                <div class="search-box">
+                    <input type="text" class="search-input" id="searchInput" placeholder="Search members...">
                 </div>
                 <div id="usersList">
                     <div class="loading"><div class="spinner"></div></div>
@@ -860,9 +1592,71 @@ HTML_TEMPLATE = '''
         </footer>
     </div>
 
+    <!-- Delete Confirmation Modal -->
+    <div class="modal-overlay" id="deleteModal">
+        <div class="modal">
+            <div class="modal-icon">&#9888;</div>
+            <h3>Remove Member?</h3>
+            <p>This action cannot be undone. <strong id="deleteUserName"></strong> will be removed from the community.</p>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-danger" id="confirmDeleteBtn">Remove</button>
+            </div>
+        </div>
+    </div>
+
     <div class="toast-container" id="toast"></div>
 
     <script>
+        let deleteUserId = null;
+
+        // Time ago function
+        const timeAgo = (dateString) => {
+            const date = new Date(dateString);
+            const now = new Date();
+            const seconds = Math.floor((now - date) / 1000);
+
+            const intervals = {
+                year: 31536000,
+                month: 2592000,
+                week: 604800,
+                day: 86400,
+                hour: 3600,
+                minute: 60
+            };
+
+            for (const [unit, secondsInUnit] of Object.entries(intervals)) {
+                const interval = Math.floor(seconds / secondsInUnit);
+                if (interval >= 1) {
+                    return interval === 1 ? `1 ${unit} ago` : `${interval} ${unit}s ago`;
+                }
+            }
+            return 'Just now';
+        };
+
+        // Check if logged in and update nav
+        const updateAuthUI = async () => {
+            try {
+                const res = await fetch('/api/current-user');
+                const authEl = document.getElementById('authLinks');
+                if (res.ok) {
+                    const data = await res.json();
+                    authEl.innerHTML = `
+                        <a href="/profile" class="nav-link">Profile</a>
+                        <div class="user-badge">
+                            <span class="avatar">${data.user.username.slice(0,2).toUpperCase()}</span>
+                            ${data.user.username}
+                        </div>
+                        <a href="/logout" class="nav-link">Logout</a>
+                    `;
+                } else {
+                    authEl.innerHTML = '<a href="/login" class="nav-link">Login</a>';
+                }
+            } catch {
+                document.getElementById('authLinks').innerHTML = '<a href="/login" class="nav-link">Login</a>';
+            }
+        };
+
         const toast = (msg, error = false) => {
             const el = document.getElementById('toast');
             el.innerHTML = `<div class="toast${error ? ' error' : ''}">${msg}</div>`;
@@ -878,24 +1672,32 @@ HTML_TEMPLATE = '''
                 const data = await res.json();
 
                 document.getElementById('userCount').textContent =
-                    data.count === 1 ? '1 user' : `${data.count} users`;
+                    data.count === 1 ? '1 member' : `${data.count} members`;
+                document.getElementById('totalUsers').textContent = data.count;
+
+                // Count users active today
+                const today = new Date().toDateString();
+                const activeToday = data.users.filter(u =>
+                    u.last_login && new Date(u.last_login).toDateString() === today
+                ).length;
+                document.getElementById('activeToday').textContent = activeToday;
 
                 if (!data.users.length) {
                     el.innerHTML = `
                         <div class="empty">
                             <div class="empty-icon">+</div>
-                            <h3>No users yet</h3>
-                            <p>Create your first user to get started</p>
+                            <h3>No members yet</h3>
+                            <p>Be the first to join the community</p>
                         </div>`;
                     return;
                 }
 
                 el.innerHTML = `
                     <table>
-                        <thead><tr><th>User</th><th>Status</th><th>Joined</th><th></th></tr></thead>
-                        <tbody>
+                        <thead><tr><th>Member</th><th>Status</th><th>Joined</th><th></th></tr></thead>
+                        <tbody id="usersTableBody">
                             ${data.users.map(u => `
-                                <tr>
+                                <tr data-username="${u.username.toLowerCase()}" data-email="${u.email.toLowerCase()}">
                                     <td>
                                         <div class="user-row">
                                             <div class="user-avatar">${u.username.slice(0,2).toUpperCase()}</div>
@@ -906,31 +1708,66 @@ HTML_TEMPLATE = '''
                                         </div>
                                     </td>
                                     <td><span class="status">Active</span></td>
-                                    <td class="date">${new Date(u.created_at).toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'})}</td>
-                                    <td><button class="btn btn-delete" onclick="deleteUser(${u.id})">Remove</button></td>
+                                    <td class="date">${timeAgo(u.created_at)}</td>
+                                    <td><button class="btn btn-delete" onclick="showDeleteModal(${u.id}, '${u.username}')">Remove</button></td>
                                 </tr>
                             `).join('')}
                         </tbody>
                     </table>`;
             } catch (e) {
-                el.innerHTML = '<div class="empty"><h3>Error loading users</h3></div>';
+                el.innerHTML = '<div class="empty"><h3>Error loading members</h3></div>';
             }
         };
 
-        const deleteUser = async (id) => {
-            if (!confirm('Delete this user?')) return;
-            try {
-                const res = await fetch(`/api/users/${id}`, {method:'DELETE'});
-                if (res.ok) { toast('User deleted'); loadUsers(); }
-                else toast('Failed to delete', true);
-            } catch { toast('Error', true); }
+        const showDeleteModal = (id, username) => {
+            deleteUserId = id;
+            document.getElementById('deleteUserName').textContent = username;
+            document.getElementById('deleteModal').classList.add('active');
         };
+
+        const closeModal = () => {
+            document.getElementById('deleteModal').classList.remove('active');
+            deleteUserId = null;
+        };
+
+        document.getElementById('confirmDeleteBtn').addEventListener('click', async () => {
+            if (!deleteUserId) return;
+            try {
+                const res = await fetch(`/api/users/${deleteUserId}`, {method:'DELETE'});
+                if (res.ok) {
+                    toast('Member removed');
+                    loadUsers();
+                }
+                else toast('Failed to remove member', true);
+            } catch { toast('Error', true); }
+            closeModal();
+        });
+
+        // Search functionality
+        document.getElementById('searchInput').addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase();
+            const rows = document.querySelectorAll('#usersTableBody tr');
+            rows.forEach(row => {
+                const username = row.dataset.username || '';
+                const email = row.dataset.email || '';
+                if (username.includes(query) || email.includes(query)) {
+                    row.classList.remove('hidden');
+                } else {
+                    row.classList.add('hidden');
+                }
+            });
+        });
+
+        // Close modal on overlay click
+        document.getElementById('deleteModal').addEventListener('click', (e) => {
+            if (e.target.id === 'deleteModal') closeModal();
+        });
 
         document.getElementById('registerForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = e.target.querySelector('button');
             btn.disabled = true;
-            btn.textContent = 'Creating...';
+            btn.textContent = 'Joining...';
 
             try {
                 const res = await fetch('/api/users', {
@@ -945,21 +1782,38 @@ HTML_TEMPLATE = '''
                 const data = await res.json();
 
                 if (res.ok) {
-                    toast(`User ${data.user.username} created`);
+                    toast(`Welcome ${data.user.username}!`);
                     e.target.reset();
                     loadUsers();
                 } else {
                     toast(data.details?.join(', ') || data.error, true);
                 }
-            } catch { toast('Error creating user', true); }
-            finally { btn.disabled = false; btn.textContent = 'Create User'; }
+            } catch { toast('Error joining community', true); }
+            finally { btn.disabled = false; btn.textContent = 'Join Community'; }
         });
 
+        updateAuthUI();
         loadUsers();
     </script>
 </body>
 </html>
 '''
+
+
+# API endpoint to get current user
+@app.route('/api/current-user', methods=['GET'])
+def current_user_api():
+    """Get current logged-in user."""
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Not logged in'}), 401
+    return jsonify({
+        'user': {
+            'id': user['id'],
+            'username': user['username'],
+            'email': user['email']
+        }
+    }), 200
 
 
 # Root endpoint - HTML Frontend
@@ -974,17 +1828,23 @@ def root():
 def api_info():
     """API information endpoint."""
     return jsonify({
-        'name': 'User Registration System API',
+        'name': 'DevCommunity API',
         'version': '1.0.0',
+        'description': 'Community Forum Registration System',
         'endpoints': {
-            'POST /api/users': 'Register a new user',
-            'GET /api/users': 'List all users',
-            'GET /api/users/<id>': 'Get user by ID',
-            'DELETE /api/users/<id>': 'Delete user by ID',
-            'GET /health': 'Health check'
+            'POST /api/users': 'Register a new member',
+            'GET /api/users': 'List all members',
+            'GET /api/users/<id>': 'Get member by ID',
+            'DELETE /api/users/<id>': 'Remove member',
+            'GET /api/current-user': 'Get current logged-in member',
+            'GET /health': 'Health check',
+            'GET /login': 'Login page',
+            'GET /logout': 'Logout',
+            'GET /profile': 'Member profile'
         }
     }), 200
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    debug_mode = os.environ.get('FLASK_ENV') == 'development'
+    app.run(host='0.0.0.0', port=5000, debug=debug_mode)

@@ -1,5 +1,6 @@
 # Claude
 .claude/
+tmpclaude-*
 
 # Python
 __pycache__/
@@ -11,16 +12,24 @@ venv/
 env/
 .venv/
 .env
+*.egg-info/
+dist/
+build/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
+._*
+
+# History
+.history/
 
 # Docker
 *.log
@@ -30,3 +39,8 @@ Thumbs.db
 .env.*.local
 credentials.json
 secrets.json
+
+# Temporary
+*.tmp
+*.temp
+*.bak

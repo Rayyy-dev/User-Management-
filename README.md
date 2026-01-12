@@ -1,30 +1,34 @@
-# User Registration System
+# DevCommunity - Community Forum Registration System
 
-A containerized REST API for user registration built with Flask, PostgreSQL, and Docker Compose. This project demonstrates a minimal authentication/signup system - a foundational component of most modern web applications.
+A containerized REST API for community member registration built with Flask, PostgreSQL, and Docker Compose. This project demonstrates a forum-style registration system where developers can join a community, view other members, and manage their profiles.
 
 ## Project Description
 
-This project implements a complete user registration system that allows:
-- **User Registration**: Create new user accounts with username, email, and password
-- **User Management**: List, retrieve, and delete user accounts
-- **Web Interface**: HTML frontend with registration form and user list
+This project implements a complete community registration system that simulates a developer forum:
+
+- **Member Registration**: Join the community with username, email, and password
+- **Member Directory**: View all community members with "joined X ago" timestamps
+- **User Authentication**: Login/logout with session management
+- **Profile Management**: View and edit your profile, change password
+- **Dashboard**: Real-time stats showing total members and active users
+- **Search**: Filter members by name or email
 - **Data Persistence**: PostgreSQL database with persistent storage
 - **Security**: Password hashing using industry-standard algorithms
-- **Input Validation**: Email format validation and input sanitization
 
 ### Real-Life Application
 
-User registration systems are essential building blocks for:
-- **Web Applications**: E-commerce sites, social media platforms, SaaS products
-- **Authentication Services**: Single sign-on (SSO) systems, identity providers
-- **Enterprise Systems**: Employee portals, customer management systems
-- **Educational Platforms**: Learning management systems, student portals
+This community registration system represents a common pattern found in:
 
-This project serves as a foundation that can be extended with features like:
-- Login/logout functionality
-- Password reset via email
-- Role-based access control
-- OAuth integration
+- **Developer Forums**: Stack Overflow, Dev.to, Reddit programming communities
+- **Online Communities**: Discord servers, Slack workspaces with member directories
+- **Learning Platforms**: Course forums where students can see classmates
+- **Open Source Projects**: Contributor registration and management
+
+The system demonstrates how modern web communities handle:
+- User onboarding and registration
+- Member discovery and networking
+- Profile management
+- Session-based authentication
 
 ---
 
@@ -50,7 +54,7 @@ This project serves as a foundation that can be extended with features like:
          │
          ▼
     Host Machine
-    http://localhost:5000  (API)
+    http://localhost:5000  (Web App)
     http://localhost:8080  (Adminer)
 ```
 
@@ -60,7 +64,7 @@ This project serves as a foundation that can be extended with features like:
 
 | Container | Image | Port | Description |
 |-----------|-------|------|-------------|
-| **flask-api** | Custom (python:3.11-slim) | 5000 | REST API application |
+| **flask-api** | Custom (python:3.11-slim) | 5000 | REST API + Web Application |
 | **postgres-db** | postgres:15 | 5432 | PostgreSQL database |
 | **adminer** | adminer:latest | 8080 | Database management GUI |
 
@@ -79,13 +83,14 @@ This project serves as a foundation that can be extended with features like:
 ## Project Structure
 
 ```
-Virtualisation Project/
+DevCommunity/
 ├── docker-compose.yml      # Container orchestration configuration
 ├── Dockerfile              # Custom Flask application image
-├── app.py                  # Flask REST API source code
+├── app.py                  # Flask REST API + Web Application
 ├── requirements.txt        # Python dependencies
 ├── init.sql                # Database initialization script
 ├── test.sh                 # API testing script with curl commands
+├── .gitignore              # Git ignore rules
 └── README.md               # Project documentation (this file)
 ```
 
@@ -133,41 +138,42 @@ Wait until you see:
 flask-api    |  * Running on http://0.0.0.0:5000
 ```
 
-### 3. Verify the Services
+### 3. Access the Application
 
-| Service | URL | Status Check |
-|---------|-----|--------------|
-| Flask API | http://localhost:5000 | Should show API info |
-| Adminer | http://localhost:8080 | Should show login page |
-| Health Check | http://localhost:5000/health | Should show "healthy" |
+| Service | URL | Description |
+|---------|-----|-------------|
+| **DevCommunity** | http://localhost:5000 | Main web application |
+| **Login Page** | http://localhost:5000/login | Member login |
+| **Profile** | http://localhost:5000/profile | Your profile (after login) |
+| **Health Check** | http://localhost:5000/health | System status |
+| **Adminer** | http://localhost:8080 | Database GUI |
 
-### 4. Test the API
+### 4. Test the Application
 
-Run the test script:
+**Using the Web Interface:**
+1. Open http://localhost:5000
+2. Fill in the registration form to join the community
+3. View the member list with "joined X ago" timestamps
+4. Login at http://localhost:5000/login
+5. Access your profile at http://localhost:5000/profile
+
+**Using the API:**
 ```bash
-# On Linux/Mac
-chmod +x test.sh
-./test.sh
-
-# On Windows (Git Bash)
-bash test.sh
-```
-
-Or test manually with curl:
-```bash
-# Register a new user
+# Register a new member
 curl -X POST http://localhost:5000/api/users \
   -H "Content-Type: application/json" \
   -d '{"username": "john_doe", "email": "john@example.com", "password": "securepass123"}'
 
-# List all users
+# List all members
 curl http://localhost:5000/api/users
 
-# Get specific user
+# Get specific member
 curl http://localhost:5000/api/users/1
+```
 
-# Delete user
-curl -X DELETE http://localhost:5000/api/users/1
+**Run the test script:**
+```bash
+bash test.sh
 ```
 
 ### 5. Access Adminer (Database GUI)
@@ -198,16 +204,19 @@ docker-compose down -v
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/` | API information |
+| `GET` | `/` | Community dashboard |
+| `GET` | `/login` | Login page |
+| `GET` | `/logout` | Logout |
+| `GET` | `/profile` | Member profile |
 | `GET` | `/health` | Health check |
-| `POST` | `/api/users` | Register new user |
-| `GET` | `/api/users` | List all users |
-| `GET` | `/api/users/<id>` | Get user by ID |
-| `DELETE` | `/api/users/<id>` | Delete user |
+| `POST` | `/api/users` | Register new member |
+| `GET` | `/api/users` | List all members |
+| `GET` | `/api/users/<id>` | Get member by ID |
+| `DELETE` | `/api/users/<id>` | Remove member |
 
 ### Request/Response Examples
 
-#### Register User
+#### Register Member
 **Request:**
 ```json
 POST /api/users
@@ -228,12 +237,12 @@ Content-Type: application/json
     "id": 1,
     "username": "john_doe",
     "email": "john@example.com",
-    "created_at": "2026-01-11T10:30:00"
+    "created_at": "2026-01-12T10:30:00"
   }
 }
 ```
 
-#### List Users
+#### List Members
 **Response (200 OK):**
 ```json
 {
@@ -242,7 +251,8 @@ Content-Type: application/json
       "id": 1,
       "username": "john_doe",
       "email": "john@example.com",
-      "created_at": "2026-01-11T10:30:00"
+      "created_at": "2026-01-12T10:30:00",
+      "last_login": "2026-01-12T11:00:00"
     }
   ],
   "count": 1
@@ -260,9 +270,32 @@ Content-Type: application/json
 | Status Code | Description |
 |-------------|-------------|
 | 400 | Bad Request (validation failed) |
-| 404 | User not found |
+| 404 | Member not found |
 | 409 | Conflict (duplicate username/email) |
 | 500 | Internal server error |
+
+---
+
+## Features
+
+### Web Interface
+- Modern, clean UI with responsive design
+- Real-time member count and activity stats
+- Search/filter functionality for member directory
+- "Joined X ago" time formatting
+- Confirmation modal for member removal
+- Toast notifications for actions
+
+### Authentication
+- Email/password login
+- Session-based authentication
+- Protected routes (profile page)
+- Last login tracking
+
+### Profile Management
+- View account information
+- Edit username and email
+- Change password (with current password verification)
 
 ---
 
@@ -292,11 +325,6 @@ lsof -i :5000                  # Linux/Mac
 # Change port in docker-compose.yml if needed
 ```
 
-### Permission denied (test.sh)
-```bash
-chmod +x test.sh
-```
-
 ---
 
 ## Security Features
@@ -305,6 +333,7 @@ chmod +x test.sh
 - **Input Validation**: All user inputs are validated before processing
 - **SQL Injection Prevention**: Using parameterized queries (psycopg2)
 - **No Password Exposure**: Passwords are never returned in API responses
+- **Session Security**: Flask sessions with secret key
 
 ---
 
